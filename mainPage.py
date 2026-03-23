@@ -9,30 +9,24 @@ st.set_page_config(page_title="DEFECTIQ", layout="wide")
 st.title("DEFECTIQ")
 st.caption("Jira-based Defect Analysis, Prioritization & Similarity Detection")
 
-# ---------------------------------------------------
-# CONFIG
-# ---------------------------------------------------
 DEFAULT_JIRA_DOMAIN = "https://jira.turkcell.com.tr"
 DEFAULT_PLATFORM_FIELD = "customfield_24721"
 
-# ---------------------------------------------------
-# INPUTS
-# ---------------------------------------------------
 jira_domain = st.text_input("Jira Domain", value=DEFAULT_JIRA_DOMAIN)
-jsessionid = st.text_input("JSESSIONID", type="password")
+cookie_header = st.text_area(
+    "Cookie Header",
+    height=120,
+    placeholder="JSESSIONID=...; atlassian.xsrf.token=...; crowd.token_key=..."
+)
 jql = st.text_area(
     "JQL",
     height=140,
     placeholder='project in (BIPC, TF) AND issuetype in (Bug, Defect) AND status not in (Cancelled, Done)'
 )
 platform_field = st.text_input("Platform Field", value=DEFAULT_PLATFORM_FIELD)
-
-# İstersen debug kapatılabilir
 debug_mode = st.checkbox("Debug Mode", value=True)
 
-# ---------------------------------------------------
-# HELPERS
-# ---------------------------------------------------
+
 def normalize(text):
     text = "" if text is None else str(text)
     text = text.lower()
@@ -43,13 +37,10 @@ def normalize(text):
 def extract_platform(val):
     if val is None:
         return ""
-
     if isinstance(val, str):
         return val
-
     if isinstance(val, dict):
         return val.get("value") or val.get("name") or str(val)
-
     if isinstance(val, list):
         out = []
         for item in val:
@@ -60,37 +51,30 @@ def extract_platform(val):
             else:
                 out.append(str(item))
         return ", ".join([x for x in out if x])
-
     return str(val)
 
 
 def extract_description(desc):
     if desc is None:
         return ""
-
     if isinstance(desc, str):
         return desc
-
     if isinstance(desc, dict):
         return str(desc)
-
     if isinstance(desc, list):
         return " ".join([str(x) for x in desc])
-
     return str(desc)
 
 
-# ---------------------------------------------------
-# JIRA FETCH
-# ---------------------------------------------------
-def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
+def fetch_all_issues(jira_domain, cookie_header, jql, platform_field):
     all_rows = []
     start_at = 0
     page_size = 100
 
     headers = {
-        "Cookie": f"JSESSIONID={jsessionid}",
-        "Accept": "application/json"
+        "Cookie": cookie_header,
+        "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest"
     }
 
     while True:
@@ -102,7 +86,7 @@ def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
             "fields": f"summary,description,priority,{platform_field}"
         }
 
-        response = requests.get(url, headers=headers, params=params, timeout=90)
+        response = requests.get(url, headers=headers, params=params, timeout=90, allow_redirects=True)
 
         if debug_mode:
             st.write("STATUS:", response.status_code)
@@ -111,14 +95,14 @@ def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-        try:
-            data = response.json()
-        except Exception:
+        content_type = response.headers.get("Content-Type", "")
+        if "application/json" not in content_type.lower():
             raise Exception(
-                "Response JSON parse edilemedi. Büyük ihtimalle Jira JSON yerine HTML/login sayfası döndü. "
-                f"Status: {response.status_code} | First 500 chars: {response.text[:500]}"
+                "JSON yerine HTML/başka response döndü. Cookie eksik veya geçersiz olabilir. "
+                f"Content-Type: {content_type} | First 500 chars: {response.text[:500]}"
             )
 
+        data = response.json()
         issues = data.get("issues", [])
         total = data.get("total", 0)
 
@@ -138,131 +122,63 @@ def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
             })
 
         start_at += len(issues)
-
         if start_at >= total:
             break
 
     return pd.DataFrame(all_rows)
 
 
-# ---------------------------------------------------
-# SEMANTIC PRIORITY ENGINE
-# ---------------------------------------------------
 def semantic_priority(summary, description):
     text = normalize(f"{summary} {description}")
 
-    # GATING - blocking / stuck / loop
     if any(k in text for k in [
-        "cannot select",
-        "does not allow",
-        "unable to select",
-        "cannot proceed",
-        "unable to continue",
-        "blocks user",
-        "blocks user interaction",
-        "prevents user",
-        "prevents selecting",
-        "stuck",
-        "loop",
-        "keeps opening",
-        "opens repeatedly",
-        "keeps appearing",
-        "popup keeps appearing",
-        "page keeps opening"
+        "cannot select", "does not allow", "unable to select", "cannot proceed",
+        "unable to continue", "blocks user", "blocks user interaction", "prevents user",
+        "prevents selecting", "stuck", "loop", "keeps opening", "opens repeatedly",
+        "keeps appearing", "popup keeps appearing", "page keeps opening"
     ]):
         return "Gating", "BLOCKING_FLOW"
 
-    # GATING - core function failure
     if any(k in text for k in [
-        "cannot send",
-        "unable to send",
-        "message not sent",
-        "cannot receive",
-        "unable to receive",
-        "login failed",
-        "cannot login",
-        "unable to login",
-        "cannot sign in",
-        "call not connecting",
-        "cannot start call",
-        "unable to start call",
-        "crash",
-        "application crashes",
-        "app crashes"
+        "cannot send", "unable to send", "message not sent", "cannot receive",
+        "unable to receive", "login failed", "cannot login", "unable to login",
+        "cannot sign in", "call not connecting", "cannot start call",
+        "unable to start call", "crash", "application crashes", "app crashes"
     ]):
         return "Gating", "CORE_FUNCTION_FAILURE"
 
-    # HIGH - interaction failure
     if any(k in text for k in [
-        "not clickable",
-        "cannot click",
-        "tap does not work",
-        "not tappable",
-        "link is not clickable",
-        "button does not work",
-        "interaction does not work"
+        "not clickable", "cannot click", "tap does not work", "not tappable",
+        "link is not clickable", "button does not work", "interaction does not work"
     ]):
         return "High", "INTERACTION_FAILURE"
 
-    # HIGH - state inconsistency
     if any(k in text for k in [
-        "appears even though",
-        "even though",
-        "although",
-        "should not be visible",
-        "not registered but",
-        "shows as",
-        "indicates they are not",
-        "incorrect state",
-        "inconsistent state",
-        "confusion",
-        "misleading",
-        "can communicate but",
+        "appears even though", "even though", "although", "should not be visible",
+        "not registered but", "shows as", "indicates they are not", "incorrect state",
+        "inconsistent state", "confusion", "misleading", "can communicate but",
         "already registered but"
     ]):
         return "High", "STATE_INCONSISTENCY"
 
-    # MEDIUM - visual artifact
     if any(k in text for k in [
-        "black line",
-        "visual artifact",
-        "render issue",
-        "thick black line",
-        "line appears",
-        "artifact persists"
+        "black line", "visual artifact", "render issue", "thick black line",
+        "line appears", "artifact persists"
     ]):
         return "Medium", "VISUAL_ARTIFACT"
 
-    # MEDIUM - performance only
-    if any(k in text for k in [
-        "lag",
-        "lags",
-        "slow",
-        "delay",
-        "scrolling lags"
-    ]):
+    if any(k in text for k in ["lag", "lags", "slow", "delay", "scrolling lags"]):
         return "Medium", "PERFORMANCE_ONLY"
 
-    # LOW - pure UI/cosmetic
     if any(k in text for k in [
-        "alignment",
-        "misalignment",
-        "font",
-        "color",
-        "spacing",
-        "icon",
-        "cosmetic",
-        "typo",
-        "misspelling"
+        "alignment", "misalignment", "font", "color", "spacing", "icon",
+        "cosmetic", "typo", "misspelling"
     ]):
         return "Low", "UI_ONLY"
 
     return "Medium", "DEFAULT"
 
 
-# ---------------------------------------------------
-# DUPLICATE ENGINE
-# ---------------------------------------------------
 def build_text_for_similarity(summary, description):
     return normalize(f"{summary} {description}")
 
@@ -292,6 +208,7 @@ def run_duplicate_analysis(df):
 
     vectorizer = TfidfVectorizer(stop_words="english")
     tfidf = vectorizer.fit_transform(df["TEXT"])
+    from sklearn.metrics.pairwise import cosine_similarity
     sim = cosine_similarity(tfidf)
 
     df["Has_Duplicate"] = False
@@ -307,7 +224,6 @@ def run_duplicate_analysis(df):
         for j in range(len(df)):
             if i == j:
                 continue
-
             current_sim = float(sim[i, j])
             if current_sim > best_sim and current_sim > 0.75:
                 best_sim = current_sim
@@ -325,10 +241,7 @@ def run_duplicate_analysis(df):
             else:
                 dtype = "POSSIBLE_SEMANTIC_DUPLICATE"
 
-            if not same_platform:
-                action = "KEEP_BOTH_DIFFERENT_PLATFORM"
-            else:
-                action = "SAFE_DELETE" if best_sim > 0.90 else "QA_REVIEW"
+            action = "KEEP_BOTH_DIFFERENT_PLATFORM" if not same_platform else ("SAFE_DELETE" if best_sim > 0.90 else "QA_REVIEW")
 
             df.at[i, "Has_Duplicate"] = True
             df.at[i, "Max_Similarity"] = round(best_sim, 3)
@@ -339,13 +252,10 @@ def run_duplicate_analysis(df):
     return df
 
 
-# ---------------------------------------------------
-# MAIN PIPELINE
-# ---------------------------------------------------
 def run_pipeline():
     raw_df = fetch_all_issues(
         jira_domain=jira_domain,
-        jsessionid=jsessionid,
+        cookie_header=cookie_header,
         jql=jql,
         platform_field=platform_field
     )
@@ -363,29 +273,16 @@ def run_pipeline():
     out_df = run_duplicate_analysis(raw_df)
 
     final_cols = [
-        "Issue Key",
-        "Summary",
-        "Description",
-        "Custom field (Platform)",
-        "Priority",
-        "STP_Priority",
-        "Reason",
-        "Has_Duplicate",
-        "Max_Similarity",
-        "Duplicate_With",
-        "Duplicate_Type",
-        "Action"
+        "Issue Key", "Summary", "Description", "Custom field (Platform)",
+        "Priority", "STP_Priority", "Reason", "Has_Duplicate",
+        "Max_Similarity", "Duplicate_With", "Duplicate_Type", "Action"
     ]
-
     return out_df[final_cols]
 
 
-# ---------------------------------------------------
-# RUN
-# ---------------------------------------------------
 if st.button("Fetch + Analyze"):
-    if not jira_domain or not jsessionid or not jql:
-        st.error("Jira Domain, JSESSIONID ve JQL zorunlu.")
+    if not jira_domain or not cookie_header or not jql:
+        st.error("Jira Domain, Cookie Header ve JQL zorunlu.")
     else:
         try:
             with st.spinner("Jira'dan kayıtlar çekiliyor ve analiz ediliyor..."):
