@@ -13,11 +13,7 @@ DEFAULT_JIRA_DOMAIN = "https://jira.turkcell.com.tr"
 DEFAULT_PLATFORM_FIELD = "customfield_24721"
 
 jira_domain = st.text_input("Jira Domain", value=DEFAULT_JIRA_DOMAIN)
-cookie_header = st.text_area(
-    "Cookie Header",
-    height=120,
-    placeholder="JSESSIONID=...; atlassian.xsrf.token=...; crowd.token_key=..."
-)
+jira_token = st.text_input("Jira Personal Access Token", type="password")
 jql = st.text_area(
     "JQL",
     height=140,
@@ -66,15 +62,14 @@ def extract_description(desc):
     return str(desc)
 
 
-def fetch_all_issues(jira_domain, cookie_header, jql, platform_field):
+def fetch_all_issues(jira_domain, jira_token, jql, platform_field):
     all_rows = []
     start_at = 0
     page_size = 100
 
     headers = {
-        "Cookie": cookie_header,
-        "Accept": "application/json",
-        "X-Requested-With": "XMLHttpRequest"
+        "Authorization": f"Bearer {jira_token}",
+        "Accept": "application/json"
     }
 
     while True:
@@ -86,7 +81,7 @@ def fetch_all_issues(jira_domain, cookie_header, jql, platform_field):
             "fields": f"summary,description,priority,{platform_field}"
         }
 
-        response = requests.get(url, headers=headers, params=params, timeout=90, allow_redirects=True)
+        response = requests.get(url, headers=headers, params=params, timeout=90)
 
         if debug_mode:
             st.write("STATUS:", response.status_code)
@@ -98,7 +93,7 @@ def fetch_all_issues(jira_domain, cookie_header, jql, platform_field):
         content_type = response.headers.get("Content-Type", "")
         if "application/json" not in content_type.lower():
             raise Exception(
-                "JSON yerine HTML/başka response döndü. Cookie eksik veya geçersiz olabilir. "
+                "JSON yerine farklı bir response döndü. Token geçersiz olabilir. "
                 f"Content-Type: {content_type} | First 500 chars: {response.text[:500]}"
             )
 
@@ -208,7 +203,6 @@ def run_duplicate_analysis(df):
 
     vectorizer = TfidfVectorizer(stop_words="english")
     tfidf = vectorizer.fit_transform(df["TEXT"])
-    from sklearn.metrics.pairwise import cosine_similarity
     sim = cosine_similarity(tfidf)
 
     df["Has_Duplicate"] = False
@@ -255,7 +249,7 @@ def run_duplicate_analysis(df):
 def run_pipeline():
     raw_df = fetch_all_issues(
         jira_domain=jira_domain,
-        cookie_header=cookie_header,
+        jira_token=jira_token,
         jql=jql,
         platform_field=platform_field
     )
@@ -281,8 +275,8 @@ def run_pipeline():
 
 
 if st.button("Fetch + Analyze"):
-    if not jira_domain or not cookie_header or not jql:
-        st.error("Jira Domain, Cookie Header ve JQL zorunlu.")
+    if not jira_domain or not jira_token or not jql:
+        st.error("Jira Domain, Token ve JQL zorunlu.")
     else:
         try:
             with st.spinner("Jira'dan kayıtlar çekiliyor ve analiz ediliyor..."):
