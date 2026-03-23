@@ -5,8 +5,9 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(page_title="Jira + BSDV_CLEAN_DEFECT", layout="wide")
-st.title("Jira + BSDV_CLEAN_DEFECT_FINAL")
+st.set_page_config(page_title="DEFECTIQ", layout="wide")
+st.title("DEFECTIQ")
+st.caption("Jira-based Defect Analysis, Prioritization & Similarity Detection")
 
 # ---------------------------------------------------
 # CONFIG
@@ -25,6 +26,9 @@ jql = st.text_area(
     placeholder='project in (BIPC, TF) AND issuetype in (Bug, Defect) AND status not in (Cancelled, Done)'
 )
 platform_field = st.text_input("Platform Field", value=DEFAULT_PLATFORM_FIELD)
+
+# İstersen debug kapatılabilir
+debug_mode = st.checkbox("Debug Mode", value=True)
 
 # ---------------------------------------------------
 # HELPERS
@@ -61,13 +65,6 @@ def extract_platform(val):
 
 
 def extract_description(desc):
-    """
-    Jira Data Center description bazen:
-    - düz string
-    - dict/list benzeri yapı
-    dönebilir.
-    Basit ama güvenli bir normalize dönüşü yapıyoruz.
-    """
     if desc is None:
         return ""
 
@@ -83,6 +80,9 @@ def extract_description(desc):
     return str(desc)
 
 
+# ---------------------------------------------------
+# JIRA FETCH
+# ---------------------------------------------------
 def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
     all_rows = []
     start_at = 0
@@ -103,12 +103,22 @@ def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
         }
 
         response = requests.get(url, headers=headers, params=params, timeout=90)
-print(response.status_code)
-print(response.text[:500])
+
+        if debug_mode:
+            st.write("STATUS:", response.status_code)
+            st.code(response.text[:500])
+
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            raise Exception(
+                "Response JSON parse edilemedi. Büyük ihtimalle Jira JSON yerine HTML/login sayfası döndü. "
+                f"Status: {response.status_code} | First 500 chars: {response.text[:500]}"
+            )
+
         issues = data.get("issues", [])
         total = data.get("total", 0)
 
@@ -141,7 +151,7 @@ print(response.text[:500])
 def semantic_priority(summary, description):
     text = normalize(f"{summary} {description}")
 
-    # GATING - blocking / stuck / loop / cannot continue
+    # GATING - blocking / stuck / loop
     if any(k in text for k in [
         "cannot select",
         "does not allow",
@@ -194,7 +204,7 @@ def semantic_priority(summary, description):
     ]):
         return "High", "INTERACTION_FAILURE"
 
-    # HIGH - state inconsistency / misleading logic
+    # HIGH - state inconsistency
     if any(k in text for k in [
         "appears even though",
         "even though",
@@ -212,7 +222,7 @@ def semantic_priority(summary, description):
     ]):
         return "High", "STATE_INCONSISTENCY"
 
-    # MEDIUM - visual artifact / render issue override
+    # MEDIUM - visual artifact
     if any(k in text for k in [
         "black line",
         "visual artifact",
@@ -223,7 +233,7 @@ def semantic_priority(summary, description):
     ]):
         return "Medium", "VISUAL_ARTIFACT"
 
-    # MEDIUM - performance only (not blocking)
+    # MEDIUM - performance only
     if any(k in text for k in [
         "lag",
         "lags",
@@ -233,7 +243,7 @@ def semantic_priority(summary, description):
     ]):
         return "Medium", "PERFORMANCE_ONLY"
 
-    # LOW - pure UI/cosmetic only
+    # LOW - pure UI/cosmetic
     if any(k in text for k in [
         "alignment",
         "misalignment",
@@ -272,7 +282,6 @@ def run_duplicate_analysis(df):
         axis=1
     )
 
-    # Boş text'leri güvene al
     if df["TEXT"].fillna("").str.strip().eq("").all():
         df["Has_Duplicate"] = False
         df["Max_Similarity"] = 0.0
@@ -344,7 +353,6 @@ def run_pipeline():
     if raw_df.empty:
         return raw_df
 
-    # Priority
     prio_results = raw_df.apply(
         lambda r: semantic_priority(r.get("Summary", ""), r.get("Description", "")),
         axis=1
@@ -352,10 +360,8 @@ def run_pipeline():
     raw_df["STP_Priority"] = [x[0] for x in prio_results]
     raw_df["Reason"] = [x[1] for x in prio_results]
 
-    # Duplicate
     out_df = run_duplicate_analysis(raw_df)
 
-    # Final order
     final_cols = [
         "Issue Key",
         "Summary",
@@ -392,7 +398,7 @@ if st.button("Fetch + Analyze"):
             st.download_button(
                 "Download Final CSV",
                 data=csv_data,
-                file_name="BSDV_CLEAN_DEFECT_JIRA_OUTPUT.csv",
+                file_name="DEFECTIQ_JIRA_OUTPUT.csv",
                 mime="text/csv"
             )
 
