@@ -103,7 +103,8 @@ def fetch_all_issues(jira_domain, jsessionid, jql, platform_field):
         }
 
         response = requests.get(url, headers=headers, params=params, timeout=90)
-
+print(response.status_code)
+print(response.text[:500])
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
